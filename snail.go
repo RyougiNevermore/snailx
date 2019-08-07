@@ -10,6 +10,7 @@ type SnailOptions struct {
 	ServiceBusKind        string
 	WorkersNum            int
 	FlyServiceBusCapacity int
+	Log                   Logger
 }
 
 type Snail interface {
