@@ -111,7 +111,7 @@ go get github.com/pharosnet/snailx
   // service function, the type of param is must be noted.
   // the first could be every prt type
   // the second must be *snailx.ServiceHandler
-  var HelloWorkService = func(arg *BookGetArg, handler *snailx.ServiceHandler) {
+  var HelloWorkService = func(arg *BookGetArg, handler snailx.ServiceHandler) {
   	bookName := arg.Name
   	book := &Book{
   		Id: "some id",

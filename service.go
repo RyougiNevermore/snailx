@@ -7,31 +7,11 @@ import (
 	"sync"
 )
 
-type ServiceHandler struct {
-	cbValue    reflect.Value
-	resultType reflect.Type
+type ServiceHandler interface {
+	Succeed(result interface{})
+	Failed(cause error)
 }
 
-var serviceHandlerPool = &sync.Pool{
-	New: func() interface{} {
-		return &ServiceHandler{}
-	},
-}
-
-var emptyErr error = errors.New("")
-
-func (h *ServiceHandler) Succeed(result interface{}) {
-	if reflect.TypeOf(result) != h.resultType {
-		panic(fmt.Sprintf("snailx: invalided result type, want %s, got %s", h.resultType, reflect.TypeOf(result)))
-	}
-	h.cbValue.Call([]reflect.Value{reflect.ValueOf(true), reflect.ValueOf(result), reflect.Zero(reflect.TypeOf(emptyErr))})
-}
-
-func (h *ServiceHandler) Failed(cause error) {
-	h.cbValue.Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(h.resultType), reflect.ValueOf(cause)})
-}
-
-var emptyServiceHandlerType = reflect.TypeOf(&ServiceHandler{})
 
 // func(v, ServiceHandler)
 type Service interface{}
@@ -44,6 +24,31 @@ type ServiceGroup interface {
 	UnDeploy(address string) (err error)
 	UnDeployAll()
 	Invoke(address string, arg interface{}, cb ServiceCallback)
+}
+
+type localServiceHandler struct {
+	cbValue    reflect.Value
+	resultType reflect.Type
+}
+
+var localServiceHandlerPool = &sync.Pool{
+	New: func() interface{} {
+		return &localServiceHandler{}
+	},
+}
+
+var emptyLocalServiceHandlerType = reflect.TypeOf(&localServiceHandler{})
+var emptyErr error = errors.New("")
+
+func (h *localServiceHandler) Succeed(result interface{}) {
+	if reflect.TypeOf(result) != h.resultType {
+		panic(fmt.Sprintf("snailx: invalided result type, want %s, got %s", h.resultType, reflect.TypeOf(result)))
+	}
+	h.cbValue.Call([]reflect.Value{reflect.ValueOf(true), reflect.ValueOf(result), reflect.Zero(reflect.TypeOf(emptyErr))})
+}
+
+func (h *localServiceHandler) Failed(cause error) {
+	h.cbValue.Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(h.resultType), reflect.ValueOf(cause)})
 }
 
 type localService struct {
@@ -88,7 +93,7 @@ func (s *localServiceGroup) Deploy(address string, service Service) (err error) 
 	}
 	argType := serviceType.In(0)
 	handlerType := serviceType.In(1)
-	if handlerType != emptyServiceHandlerType {
+	if !emptyLocalServiceHandlerType.Implements(handlerType) {
 		err = fmt.Errorf("the second parameter of service needs to be a *ServiceHandler")
 		return
 	}
@@ -151,14 +156,14 @@ func (s *localServiceGroup) Invoke(address string, arg interface{}, cb ServiceCa
 			panic("snailx: cb needs 3 parameters, first type is bool, second type is the service result type, last type is error")
 		}
 		resultType := cbType.In(1)
-		handler, ok := serviceHandlerPool.Get().(*ServiceHandler)
+		handler, ok := localServiceHandlerPool.Get().(*localServiceHandler)
 		if !ok {
 			panic("snailx: get service handler from pool failed, bad type")
 		}
 		handler.cbValue = reflect.ValueOf(cb)
 		handler.resultType = resultType
 		service.service.Call([]reflect.Value{reflect.ValueOf(arg), reflect.ValueOf(handler)})
-		serviceHandlerPool.Put(handler)
+		localServiceHandlerPool.Put(handler)
 	}
 	return
 }
