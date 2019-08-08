@@ -64,7 +64,7 @@ func encodeServiceResult(codec Codec, requestId string, ok bool, v interface{}, 
 	return
 }
 
-func decodeServiceResult(codec Codec, p []byte) (requestId string, ok bool, v []byte, err error) {
+func decodeServiceResult(p []byte) (requestId string, ok bool, v []byte, err error) {
 	if p == nil || len(p) == 0 {
 		err = fmt.Errorf("empty data bytes")
 		return
@@ -206,7 +206,6 @@ type natsConn struct {
 	conn    *nats.Conn
 	codec   Codec
 	timeout time.Duration
-	voidMsg []byte
 }
 
 type natsServiceHandler struct {
@@ -435,7 +434,7 @@ func (s *natsService) listen(conn *natsConn) {
 	}
 	s.requestQueue = requestQueue
 	responseQueue, subErr := conn.conn.QueueSubscribe(s.responseSubject, natsServiceQueueName, func(msg *nats.Msg) {
-		requestId, ok, result, cause := decodeServiceResult(conn.codec, msg.Data)
+		requestId, ok, result, cause := decodeServiceResult(msg.Data)
 		if requestId == "" && cause != nil {
 			if err := msg.Respond(encodeServiceAck(false, cause)); err != nil {
 				logger.Warnf("snailx: send ack failed, %s", err)
