@@ -1,3 +1,42 @@
 cluster ->  nats
             use publish to nook others, 1. consume topic (discard self) , then add self, push all to others, package { id, service list }
             make tow queue consumers every service, one is listen request, another is listen response.
+            response : make a event loop to sub response topic, get response , fetch chan by request id
+            invoke, new request id, make a chan with timeout ctx, put it into map[req-id]chan, send request to gnats, (test no topic)
+
+            data buffer [HEAD LEN (4 BYTE) + HEAD(REQUEST  queue name + request id) + payload]
+            h1 := "abc"
+            	bd := "123456"
+
+            	buf1 := bytes.NewBuffer([]byte{})
+
+            	binary.Write(buf1, binary.BigEndian, int32(len(h1)) + int32(len(bd)) + 4)
+            	binary.Write(buf1, binary.BigEndian, int32(len(h1)))
+            	fmt.Println(buf1.Len(), buf1.Cap())
+            	buf1.WriteString(h1)
+            	buf1.WriteString(bd)
+
+            	bb := buf1.Bytes()
+            	var buf = bytes.NewBuffer([]byte{})
+            	buf.Write(bb[:len(bb)])
+            	//hh, _ := buf.ReadBytes(4)
+            	//var bufh = bytes.NewBuffer([]byte{})
+            	//bufh.Write(hh[:len(bb)])
+            	var length int32
+            	var headerLength int32
+
+            	binary.Read(buf, binary.BigEndian, &length)
+            	fmt.Println(headerLength)
+            	binary.Read(buf, binary.BigEndian, &headerLength)
+            	header := make([]byte, headerLength)
+            	buf.Read(header)
+            	bodyLength := length - 4 - headerLength
+            	body := make([]byte, int(bodyLength))
+            	buf.Read(body)
+            	fmt.Println(string(header), string(body))
+
+           producer
+           make request id, new a chan{ok, data, error}, put chan into response chans to wait data.
+           use request -> service -> get arg then send back ack,
+           if producer get ack response then go wait
+           else send a fail to the response chan. then listen the chan

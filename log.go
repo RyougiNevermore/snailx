@@ -23,6 +23,10 @@ type Logger interface {
 
 var logger Logger = nil
 
+func SetLogger(log Logger)  {
+	logger = log
+}
+
 func Newlogger(level int) Logger {
 	return &slog{Level:level}
 }
