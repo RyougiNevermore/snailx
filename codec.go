@@ -12,6 +12,10 @@ type Codec interface {
 	Unmarshal(data []byte, v interface{}) (err error)
 }
 
+func NewJsonCodec() Codec {
+	return &jsonCodec{}
+}
+
 type jsonCodec struct {}
 
 func (c *jsonCodec) Marshal(v interface{}) (data []byte, err error) {
@@ -24,6 +28,11 @@ func (c *jsonCodec) Unmarshal(data []byte, v interface{}) (err error) {
 	return
 }
 
+
+func NewMsgPackCodec() Codec {
+	return &msgpackCodec{}
+}
+
 type msgpackCodec struct {}
 
 func (c *msgpackCodec) Marshal(v interface{}) (data []byte, err error) {
@@ -34,6 +43,10 @@ func (c *msgpackCodec) Marshal(v interface{}) (data []byte, err error) {
 func (c *msgpackCodec) Unmarshal(data []byte, v interface{}) (err error) {
 	err = msgpack.Decode(data, v)
 	return
+}
+
+func NewProtoCodecCodec() Codec {
+	return &protoCodec{}
 }
 
 type protoCodec struct {}
