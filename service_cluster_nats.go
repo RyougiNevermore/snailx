@@ -283,48 +283,119 @@ const natsServiceQueueName = "service"
 
 func newResponseMap() *responseChannels {
 	return &responseChannels{
-		mutex:     new(spinlock),
-		responses: make(map[string]chan *natsServiceResponse),
+		responses: new(sync.Map),
 	}
 }
 
 type responseChannels struct {
-	mutex     sync.Locker
-	responses map[string]chan *natsServiceResponse
+	responses *sync.Map
 }
 
 func (m *responseChannels) getWithDelete(name string) chan *natsServiceResponse {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	if resp, has := m.responses[name]; has {
-		delete(m.responses, name)
+	m.responses.Load(name)
+	if value, has := m.responses.Load(name); has {
+		resp, _ := value.(chan *natsServiceResponse)
+		m.responses.Delete(name)
 		return resp
 	}
 	return nil
 }
 
 func (m *responseChannels) delete(name string) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	if _, has := m.responses[name]; has {
-		delete(m.responses, name)
-	}
+	m.responses.Delete(name)
 }
 
 func (m *responseChannels) put(name string, ch chan *natsServiceResponse) {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	m.responses[name] = ch
+	m.responses.Store(name, ch)
 }
 
 func (m *responseChannels) clean() {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	for name, responseChan := range m.responses {
-		delete(m.responses, name)
-		close(responseChan)
+	rs := make([]string, 0, 1)
+	m.responses.Range(func(key, value interface{}) bool {
+		k, _ := key.(string)
+		rs = append(rs, k)
+		resp, _ := value.(chan *natsServiceResponse)
+		close(resp)
+		return true
+	})
+	for _, name :=  range rs {
+		m.responses.Delete(name)
 	}
 }
+
+func newNatsService(address string, conn *natsConn, local *localService) (s *natsService, err error) {
+	eventLoop := newNatsServiceResponseEventLoop(runtime.NumCPU() * 128)
+	if err = eventLoop.start(); err != nil {
+		return
+	}
+	s = &natsService{
+		address:         address,
+		subject:         buildNatsServiceSubject(address),
+		responseSubject: buildNatsServiceResponseSubject(address),
+		wg:              new(sync.WaitGroup),
+		responseMap:     newResponseMap(),
+		eventLoop:       eventLoop,
+	}
+	if local != nil {
+		s.local = local
+		s.listenRequest(conn)
+	}
+	s.listenResponse(conn)
+	return
+}
+
+func newNatsServiceMap() *natsServiceMap {
+	return &natsServiceMap{
+		services: new(sync.Map),
+	}
+}
+
+type natsServiceMap struct {
+	services *sync.Map
+}
+
+func (m *natsServiceMap) put(name string, service *natsService) {
+	m.services.Store(name, service)
+}
+func (m *natsServiceMap) get(name string) *natsService {
+	value , ok := m.services.Load(name)
+	if !ok {
+		return nil
+	}
+	service, _ := value.(*natsService)
+	return service
+}
+
+
+func (m *natsServiceMap) getOrStore(name string, conn *natsConn, local *localService) *natsService {
+	service := &natsService{
+		address:         name,
+		subject:         buildNatsServiceSubject(name),
+		responseSubject: buildNatsServiceResponseSubject(name),
+		wg:              new(sync.WaitGroup),
+	}
+	value , ok := m.services.LoadOrStore(name, service)
+	if ok {
+		service = nil
+		service, _ = value.(*natsService)
+		return service
+	}
+	service.responseMap = newResponseMap()
+	eventLoop := newNatsServiceResponseEventLoop(runtime.NumCPU() * 128)
+	if err := eventLoop.start(); err != nil {
+		panic(fmt.Errorf("snalix: new service failed. %v", err))
+		return nil
+	}
+	service.eventLoop = eventLoop
+	if local != nil {
+		service.local = local
+		service.listenRequest(conn)
+	}
+	service.listenResponse(conn)
+	return service
+}
+
+
 
 type natsService struct {
 	address         string
@@ -385,6 +456,7 @@ func (s *natsService) request(conn *natsConn, arg interface{}, cb reflect.Value,
 }
 
 func (s *natsService) response(requestId string, ok bool, v []byte, cause error) {
+	logger.Debugf("rsss2 %v %v", &s, s.responseMap.responses)
 	ch := s.responseMap.getWithDelete(requestId)
 	if ch == nil {
 		logger.Warnf("can not fetch response chan, %s", requestId)
@@ -472,7 +544,8 @@ func (s *natsService) listenResponse(conn *natsConn) {
 }
 
 func newNatsServiceGroup(conn *nats.Conn, codec Codec, timeout time.Duration) ServiceGroup {
-	return &natsServiceGroup{
+	ch := make(chan *invokeEvent, runtime.NumCPU() * 128)
+	group := &natsServiceGroup{
 		conn: &natsConn{
 			conn:    conn,
 			codec:   codec,
@@ -482,14 +555,21 @@ func newNatsServiceGroup(conn *nats.Conn, codec Codec, timeout time.Duration) Se
 			mutex:    new(sync.RWMutex),
 			services: make(map[string]*localService),
 		},
-		remotes: make(map[string]*natsService),
+		remotes: newNatsServiceMap(),
+		//mutex:&spinlock{},
+		ch:ch,
+		//responseMap:newResponseMap(),
 	}
+	group.listenInvoke()
+	return group
 }
 
 type natsServiceGroup struct {
 	conn    *natsConn
 	locals  *localServiceGroup
-	remotes map[string]*natsService
+	remotes *natsServiceMap
+	//responseMap     *responseChannels
+	ch   chan *invokeEvent
 }
 
 func buildNatsServiceSubject(address string) string {
@@ -510,18 +590,12 @@ func (s *natsServiceGroup) Deploy(address string, service Service) (err error) {
 	if err = eventLoop.start(); err != nil {
 		return
 	}
-	natsService := &natsService{
-		address:         address,
-		subject:         buildNatsServiceSubject(address),
-		responseSubject: buildNatsServiceResponseSubject(address),
-		wg:              new(sync.WaitGroup),
-		responseMap:     newResponseMap(),
-		local:           s.locals.services[address],
-		eventLoop:       eventLoop,
+	natsService, newServiceErr := newNatsService(address, s.conn, s.locals.services[address])
+	if newServiceErr != nil {
+		err = newServiceErr
+		return
 	}
-	natsService.listenRequest(s.conn)
-	natsService.listenResponse(s.conn)
-	s.remotes[address] = natsService
+	s.remotes.put(address, natsService)
 	return
 }
 
@@ -532,29 +606,23 @@ func (s *natsServiceGroup) UnDeploy(address string) (err error) {
 	}
 	s.locals.mutex.Lock()
 	defer s.locals.mutex.Unlock()
-	if service, has := s.remotes[address]; has {
-		delete(s.remotes, address)
-		service.stop()
+	service := s.remotes.get(address)
+	service.stop()
+	s.remotes.services.Delete(address)
 
-	}
 	return
 }
 
 func (s *natsServiceGroup) UnDeployAll() {
 	s.locals.UnDeployAll()
-
 	s.locals.mutex.Lock()
 	defer s.locals.mutex.Unlock()
-	addresses := make([]string, 0, len(s.remotes))
-	for address := range s.remotes {
-		addresses = append(addresses, address)
-	}
-	for _, address := range addresses {
-		if service, has := s.remotes[address]; has {
-			delete(s.remotes, address)
-			service.stop()
-		}
-	}
+	s.remotes.services.Range(func(key, value interface{}) bool {
+		service, _ := value.(*natsService)
+		service.stop()
+		s.remotes.services.Delete(key)
+		return true
+	})
 	return
 }
 
@@ -579,31 +647,71 @@ func (s *natsServiceGroup) Invoke(address string, arg interface{}, cb ServiceCal
 	if errType.Name() != "error" {
 		panic("snailx: cb needs 3 parameters, first type is bool, second type is the service result type, last type is error")
 	}
-	s.locals.mutex.RLock()
-	defer s.locals.mutex.RUnlock()
-	service, hasService := s.remotes[address]
-	if hasService {
-		err := service.request(s.conn, arg, reflect.ValueOf(cb), resultType)
-		if err != nil {
-			reflect.ValueOf(cb).Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(resultType), reflect.ValueOf(err)})
-		}
-	} else {
-		s.locals.mutex.Lock()
-		natsService := &natsService{
-			address:         address,
-			subject:         buildNatsServiceSubject(address),
-			responseSubject: buildNatsServiceResponseSubject(address),
-			wg:              new(sync.WaitGroup),
-			responseMap:     newResponseMap(),
-			local:           s.locals.services[address],
-		}
-		natsService.listenResponse(s.conn)
-		s.remotes[address] = natsService
-		s.locals.mutex.Unlock()
-		err := service.request(s.conn, arg, reflect.ValueOf(cb), resultType)
-		if err != nil {
-			reflect.ValueOf(cb).Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(resultType), reflect.ValueOf(err)})
-		}
+	s.ch <- &invokeEvent{
+		address:address,
+		arg:arg,
+		cb:cb,
+		resultType:resultType,
 	}
+	//s.mutex.Lock()
+	//defer s.mutex.Unlock()
+	//service, hasService := s.remotes[address]
+	//logger.Debugf("old %v %v %v %v", hasService, &service, &s.remotes, address)
+	//if hasService {
+	//	//s.mutex.RUnlock()
+	//	err := s.remotes[address].request(s.conn, arg, reflect.ValueOf(cb), resultType)
+	//	if err != nil {
+	//		reflect.ValueOf(cb).Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(resultType), reflect.ValueOf(err)})
+	//	}
+	//} else {
+	//	//s.mutex.RUnlock()
+	//	//s.mutex.Lock()
+	//	//s.cond.Wait()
+	//
+	//	natsService, newServiceErr := newNatsService(address, s.conn, nil)
+	//	if newServiceErr != nil {
+	//		s.mutex.Unlock()
+	//		s.cond.Broadcast()
+	//		panic("snailx: create remote service failed")
+	//	}
+	//	logger.Debugf("new %v", &natsService)
+	//	s.remotes[address] = natsService
+	//	//s.mutex.Unlock()
+	//	//s.cond.Broadcast()
+	//	err := natsService.request(s.conn, arg, reflect.ValueOf(cb), resultType)
+	//	if err != nil {
+	//		reflect.ValueOf(cb).Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(resultType), reflect.ValueOf(err)})
+	//	}
+	//}
 	return
+}
+
+type invokeEvent struct {
+	address string
+	arg interface{}
+	cb ServiceCallback
+	resultType reflect.Type
+}
+
+func (s *natsServiceGroup) listenInvoke() {
+	go func(s *natsServiceGroup) {
+		for {
+			e, ok := <- s.ch
+			if !ok {
+				break
+			}
+			address := e.address
+			arg := e.arg
+			cb := e.cb
+			resultType := e.resultType
+			//s.mutex.Lock()
+			service := s.remotes.getOrStore(address, s.conn, nil)
+			logger.Debugf("servcie %v", &service)
+			err := service.request(s.conn, arg, reflect.ValueOf(cb), resultType)
+			if err != nil {
+				reflect.ValueOf(cb).Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(resultType), reflect.ValueOf(err)})
+			}
+
+		}
+	}(s)
 }
