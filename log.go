@@ -30,6 +30,10 @@ func SetLogger(log Logger)  {
 	logger = log
 }
 
+func Log() Logger {
+	return logger
+}
+
 func Newlogger(level int) Logger {
 	colorable.NewColorableStdout()
 	return &slog{Level:level}

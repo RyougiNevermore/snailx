@@ -25,7 +25,7 @@ func encodeServiceResult(codec Codec, requestId string, ok bool, v interface{}, 
 			return
 		}
 	}
-	hasContent = len(body) == 0
+	hasContent = len(body) != 0
 	header := requestId
 	if ok {
 		header = header + "1"
@@ -80,7 +80,6 @@ func decodeServiceResult(p []byte) (requestId string, ok bool, v []byte, err err
 		err = fmt.Errorf("invaild header bytes")
 		return
 	}
-
 	header := make([]byte, int(headerLength))
 	if n, rErr := buf.Read(header); n != int(headerLength) || rErr != nil {
 		err = fmt.Errorf("read header bytes")
@@ -89,11 +88,11 @@ func decodeServiceResult(p []byte) (requestId string, ok bool, v []byte, err err
 
 	// header = int int int + string
 	requestId = string(header[:22])
-	ok = header[23] == 49
-	hasPayload := header[24] == 49
-	hasCause := header[25] == 49
+	ok = header[22] == 49
+	hasPayload := header[23] == 49
+	hasCause := header[24] == 49
 	if hasCause {
-		err = errors.New(string(header[26:]))
+		err = errors.New(string(header[25:]))
 	}
 	if !hasPayload {
 		v = nil
@@ -175,7 +174,7 @@ func decodeServiceRequest(codec Codec, p []byte) (subject string, requestId stri
 		}
 	}
 	requestId = string(header[:22])
-	subject = string(header[23:])
+	subject = string(header[22:])
 	return
 }
 
@@ -281,57 +280,103 @@ var natsServiceResponsePool = &sync.Pool{
 
 const natsServiceQueueName = "service"
 
+func newResponseMap() *responseChannels {
+	return &responseChannels{
+		mutex:     new(spinlock),
+		responses: make(map[string]chan *natsServiceResponse),
+	}
+}
+
+type responseChannels struct {
+	mutex     sync.Locker
+	responses map[string]chan *natsServiceResponse
+}
+
+func (m *responseChannels) getWithDelete(name string) chan *natsServiceResponse {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	if resp, has := m.responses[name]; has {
+		delete(m.responses, name)
+		return resp
+	}
+	return nil
+}
+
+func (m *responseChannels) delete(name string) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	if _, has := m.responses[name]; has {
+		delete(m.responses, name)
+	}
+}
+
+func (m *responseChannels) put(name string, ch chan *natsServiceResponse) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	m.responses[name] = ch
+}
+
+func (m *responseChannels) clean() {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	for name, responseChan := range m.responses {
+		delete(m.responses, name)
+		close(responseChan)
+	}
+}
+
 type natsService struct {
+	address         string
 	subject         string
 	responseSubject string
-	mutex           sync.Locker
 	wg              *sync.WaitGroup
-	responseMap     map[string]chan *natsServiceResponse
+	responseMap     *responseChannels
 	requestQueue    *nats.Subscription
 	responseQueue   *nats.Subscription
 	local           *localService
 }
 
 func (s *natsService) stop() {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
 	_ = s.requestQueue.Unsubscribe()
 	_ = s.responseQueue.Unsubscribe()
-	for _, responseChan := range s.responseMap {
-		close(responseChan)
-	}
+	s.responseMap.clean()
 	s.wg.Wait()
 	return
 }
 
-func (s *natsService) request(address string, conn *natsConn, arg interface{}, cb reflect.Value, resultType reflect.Type) (err error) {
+func (s *natsService) request(conn *natsConn, arg interface{}, cb reflect.Value, resultType reflect.Type) (err error) {
 	requestId := nuid.Next()
 	subject := s.responseSubject
+	ch := make(chan *natsServiceResponse, 1)
+	s.responseMap.put(requestId, ch)
 	p, encodeErr := encodeServiceRequest(conn.codec, subject, requestId, arg)
 	if encodeErr != nil {
+		s.responseMap.delete(requestId)
 		err = encodeErr
 		return
 	}
-	ack, sendErr := conn.conn.Request(buildNatsServiceSubject(address), p, conn.timeout)
+	ack, sendErr := conn.conn.Request(s.subject, p, conn.timeout)
 	if sendErr != nil {
+		s.responseMap.delete(requestId)
 		err = sendErr
 	}
 	if ack == nil {
+		s.responseMap.delete(requestId)
 		err = fmt.Errorf("empty ack")
 		return
 	}
 	ok, cause := decodeServiceAck(ack.Data)
 	if !ok {
 		if cause != nil {
+			s.responseMap.delete(requestId)
 			err = cause
 		} else {
+			s.responseMap.delete(requestId)
 			err = fmt.Errorf("ack failed")
 		}
 		return
 	}
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	ch := make(chan *natsServiceResponse, 1)
+
 	s.wg.Add(1)
 	// TODO CHANGE TO EVENT BUS
 	go func(ch chan *natsServiceResponse, wg *sync.WaitGroup, cb reflect.Value, codec Codec) {
@@ -349,9 +394,9 @@ func (s *natsService) request(address string, conn *natsConn, arg interface{}, c
 			resultValue = reflect.New(resultType)
 			var decodeErr error
 			if resultType.Kind() == reflect.Ptr {
-				decodeErr = codec.Unmarshal(resp.data, resultValue)
+				decodeErr = codec.Unmarshal(resp.data, resultValue.Interface())
 			} else {
-				decodeErr = codec.Unmarshal(resp.data, &resultValue)
+				decodeErr = codec.Unmarshal(resp.data, resultValue.Elem().Interface())
 			}
 			if decodeErr != nil {
 				respOk = false
@@ -371,7 +416,11 @@ func (s *natsService) request(address string, conn *natsConn, arg interface{}, c
 			causeValue = emptyErrValue
 		}
 
-		cb.Call([]reflect.Value{okValue, resultValue, causeValue})
+		if resultType.Kind() == reflect.Ptr {
+			cb.Call([]reflect.Value{okValue, resultValue.Elem(), causeValue})
+		} else {
+			cb.Call([]reflect.Value{okValue, resultValue, causeValue})
+		}
 
 		resp.ok = false
 		resp.data = nil
@@ -383,10 +432,8 @@ func (s *natsService) request(address string, conn *natsConn, arg interface{}, c
 }
 
 func (s *natsService) response(requestId string, ok bool, v []byte, cause error) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	ch, has := s.responseMap[requestId]
-	if !has {
+	ch := s.responseMap.getWithDelete(requestId)
+	if ch == nil {
 		logger.Warnf("can not fetch response chan, %s", requestId)
 		return
 	}
@@ -399,59 +446,69 @@ func (s *natsService) response(requestId string, ok bool, v []byte, cause error)
 	resp.cause = cause
 	resp.data = v
 	ch <- resp
-	delete(s.responseMap, requestId)
 	close(ch)
 }
 
-func (s *natsService) listen(conn *natsConn) {
+func (s *natsService) listenRequest(conn *natsConn) {
 	requestQueue, subErr := conn.conn.QueueSubscribe(s.subject, natsServiceQueueName, func(msg *nats.Msg) {
 		// decode
 		subject, requestId, argBytes, decodeErr := decodeServiceRequest(conn.codec, msg.Data)
 		if decodeErr != nil {
 			if err := msg.Respond(encodeServiceAck(false, decodeErr)); err != nil {
-				logger.Warnf("snailx: send ack failed, discard service call, %v", err)
+				logger.Warnf("send ack failed, discard service call, %v", err)
 			}
 			return
 		}
 		arg := reflect.New(s.local.argType)
 		var decodeArgErr error
 		if s.local.argType.Kind() == reflect.Ptr {
-			decodeArgErr = conn.codec.Unmarshal(argBytes, arg)
+			decodeArgErr = conn.codec.Unmarshal(argBytes, arg.Interface())
 		} else {
-			decodeArgErr = conn.codec.Unmarshal(argBytes, &arg)
+			decodeArgErr = conn.codec.Unmarshal(argBytes, arg.Elem().Interface())
 		}
 		if decodeArgErr != nil {
 			if err := msg.Respond(encodeServiceAck(false, decodeArgErr)); err != nil {
-				logger.Warnf("snailx: send ack failed, discard service call, %v", decodeArgErr)
+				logger.Warnf("send ack failed, discard service call, %v", decodeArgErr)
 			}
 			return
 		}
 		if err := msg.Respond(encodeServiceAck(true, nil)); err != nil {
-			logger.Warnf("snailx: send ack failed, discard service call, %v", err)
+			logger.Warnf("send ack failed, discard service call, %v", err)
 			return
 		}
 		handler, ok := natsServiceHandlerPool.Get().(*natsServiceHandler)
 		if !ok {
 			panic("snailx: get service handler from pool failed, bad type")
 		}
-		logger.Debugf("service arg %v", arg)
 		handler.subject = subject
 		handler.conn = conn
 		handler.requestId = requestId
-		s.local.call(arg, handler)
+		if s.local.argType.Kind() == reflect.Ptr {
+			s.local.call(arg.Elem().Interface(), handler)
+		} else {
+			s.local.call(arg.Interface(), handler)
+		}
 		natsServiceHandlerPool.Put(handler)
+
 	})
 	if subErr != nil {
 		panic(fmt.Errorf("snailx: build remote service failed, %v", subErr))
 	}
 	s.requestQueue = requestQueue
+
+}
+
+func (s *natsService) listenResponse(conn *natsConn) {
 	responseQueue, subErr := conn.conn.QueueSubscribe(s.responseSubject, natsServiceQueueName, func(msg *nats.Msg) {
 		requestId, ok, result, cause := decodeServiceResult(msg.Data)
 		if requestId == "" && cause != nil {
 			if err := msg.Respond(encodeServiceAck(false, cause)); err != nil {
-				logger.Warnf("snailx: send ack failed, %s", err)
+				logger.Warnf("send ack failed, %s", err)
 			}
 			return
+		}
+		if err := msg.Respond(encodeServiceAck(true, nil)); err != nil {
+			logger.Warnf("send ack failed, %s", err)
 		}
 		s.response(requestId, ok, result, cause)
 	})
@@ -497,14 +554,15 @@ func (s *natsServiceGroup) Deploy(address string, service Service) (err error) {
 	s.locals.mutex.Lock()
 	defer s.locals.mutex.Unlock()
 	natsService := &natsService{
+		address:         address,
 		subject:         buildNatsServiceSubject(address),
 		responseSubject: buildNatsServiceResponseSubject(address),
-		mutex:           new(spinlock),
 		wg:              new(sync.WaitGroup),
-		responseMap:     make(map[string]chan *natsServiceResponse),
+		responseMap:     newResponseMap(),
 		local:           s.locals.services[address],
 	}
-	natsService.listen(s.conn)
+	natsService.listenRequest(s.conn)
+	natsService.listenResponse(s.conn)
 	s.remotes[address] = natsService
 	return
 }
@@ -547,7 +605,6 @@ func (s *natsServiceGroup) Invoke(address string, arg interface{}, cb ServiceCal
 		s.locals.Invoke(address, arg, cb, local...)
 		return
 	}
-	logger.Debugf("invoke remote service, address is %s", address)
 	cbType := reflect.TypeOf(cb)
 	if cbType.Kind() != reflect.Func {
 		panic("snailx: cb needs to be a func")
@@ -565,15 +622,30 @@ func (s *natsServiceGroup) Invoke(address string, arg interface{}, cb ServiceCal
 		panic("snailx: cb needs 3 parameters, first type is bool, second type is the service result type, last type is error")
 	}
 	s.locals.mutex.RLock()
+	defer s.locals.mutex.RUnlock()
 	service, hasService := s.remotes[address]
-	s.locals.mutex.RUnlock()
 	if hasService {
-		err := service.request(address, s.conn, arg, reflect.ValueOf(cb), resultType)
+		err := service.request(s.conn, arg, reflect.ValueOf(cb), resultType)
 		if err != nil {
 			reflect.ValueOf(cb).Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(resultType), reflect.ValueOf(err)})
 		}
 	} else {
-		reflect.ValueOf(cb).Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(resultType), reflect.ValueOf(NoServiceFetched)})
+		s.locals.mutex.Lock()
+		natsService := &natsService{
+			address:         address,
+			subject:         buildNatsServiceSubject(address),
+			responseSubject: buildNatsServiceResponseSubject(address),
+			wg:              new(sync.WaitGroup),
+			responseMap:     newResponseMap(),
+			local:           s.locals.services[address],
+		}
+		natsService.listenResponse(s.conn)
+		s.remotes[address] = natsService
+		s.locals.mutex.Unlock()
+		err := service.request(s.conn, arg, reflect.ValueOf(cb), resultType)
+		if err != nil {
+			reflect.ValueOf(cb).Call([]reflect.Value{reflect.ValueOf(false), reflect.Zero(resultType), reflect.ValueOf(err)})
+		}
 	}
 	return
 }
