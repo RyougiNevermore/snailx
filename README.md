@@ -38,6 +38,32 @@ go get github.com/pharosnet/snailx
   }
   ```
 
+* snailx cluster
+
+  ```go
+  c, ncErr := nats.Connect(nats.DefaultURL)
+  if ncErr != nil {
+  	fmt.Println(ncErr)
+  	return  
+  }
+  // set logger default is warn level
+  snailx.SetLogger(snailx.Newlogger(snailx.LoggerLevelDebug))
+  // using snailx
+  x := snailx.NewNatsCluster(c, snailx.NewMsgPackCodec(), 2 * time.Second)
+  // default service bus, event loop type
+  x.Deploy(&BookSnail{})
+  // worker type service bus
+  x.DeployWithOptions(&BookConsumerSnail{}, snailx.SnailOptions{ServiceBusKind:snailx.WorkerServiceBus, WorkersNum:4})
+  // graceful shutdown
+  sigint := make(chan os.Signal,1)
+  signal.Notify(sigint, syscall.SIGINT, syscall.SIGTERM)
+  sig := <-sigint
+  fmt.Println("sigint:", sig)
+  // call snalix stop
+  if err := x.Stop(); err != nil {
+      fmt.Println("stop failed", err)
+  }
+  ```
   
 
 * snail app
@@ -129,7 +155,7 @@ go get github.com/pharosnet/snailx
 
 ## Todo
 
-- [ ] cluster
+- [X] cluster
 - [ ] snail http
 - [ ] snail pg client
 - [ ] snail net
