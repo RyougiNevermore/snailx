@@ -143,7 +143,7 @@ func encodeServiceRequest(codec Codec, subject string, requestId string, v inter
 }
 
 // header(requestId + subject) body(v)
-func decodeServiceRequest(codec Codec, p []byte) (subject string, requestId string, v []byte, err error) {
+func decodeServiceRequest(p []byte) (subject string, requestId string, v []byte, err error) {
 	if p == nil || len(p) == 0 {
 		err = fmt.Errorf("empty data bytes")
 		return
@@ -405,7 +405,7 @@ func (s *natsService) response(requestId string, ok bool, v []byte, cause error)
 func (s *natsService) listenRequest(conn *natsConn) {
 	requestQueue, subErr := conn.conn.QueueSubscribe(s.subject, natsServiceQueueName, func(msg *nats.Msg) {
 		// decode
-		subject, requestId, argBytes, decodeErr := decodeServiceRequest(conn.codec, msg.Data)
+		subject, requestId, argBytes, decodeErr := decodeServiceRequest(msg.Data)
 		if decodeErr != nil {
 			if err := msg.Respond(encodeServiceAck(false, decodeErr)); err != nil {
 				logger.Warnf("send ack failed, discard service call, %v", err)
