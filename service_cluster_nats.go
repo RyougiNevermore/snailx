@@ -143,7 +143,7 @@ func encodeServiceRequest(codec Codec, subject string, requestId string, v inter
 }
 
 // header(requestId + subject) body(v)
-func decodeServiceRequest(codec Codec, p []byte) (subject string, requestId string, v interface{}, err error) {
+func decodeServiceRequest(codec Codec, p []byte) (subject string, requestId string, v []byte, err error) {
 	if p == nil || len(p) == 0 {
 		err = fmt.Errorf("empty data bytes")
 		return
@@ -159,24 +159,23 @@ func decodeServiceRequest(codec Codec, p []byte) (subject string, requestId stri
 		err = fmt.Errorf("invaild header bytes")
 		return
 	}
-	bodyLength := length - 4 - headerLength
+
 	header := make([]byte, int(headerLength))
 	if n, rErr := buf.Read(header); n != int(headerLength) || rErr != nil {
 		err = fmt.Errorf("read header bytes")
 		return
 	}
-	body := make([]byte, int(bodyLength))
-	if n, rErr := buf.Read(body); n != int(bodyLength) || rErr != nil {
-		err = fmt.Errorf("read body bytes")
-		return
+
+	bodyLength := length - 4 - headerLength
+	if bodyLength > 0 {
+		v = make([]byte, int(bodyLength))
+		if n, rErr := buf.Read(v); n != int(bodyLength) || rErr != nil {
+			err = fmt.Errorf("read body bytes")
+			return
+		}
 	}
 	requestId = string(header[:22])
 	subject = string(header[23:])
-	if reflect.TypeOf(v).Kind() == reflect.Ptr {
-		err = codec.Unmarshal(body, v)
-	} else {
-		err = codec.Unmarshal(body, &v)
-	}
 	return
 }
 
@@ -337,7 +336,6 @@ func (s *natsService) request(address string, conn *natsConn, arg interface{}, c
 	// TODO CHANGE TO EVENT BUS
 	go func(ch chan *natsServiceResponse, wg *sync.WaitGroup, cb reflect.Value, codec Codec) {
 		defer wg.Done()
-		// todo
 		resp, ok := <-ch
 		if !ok {
 			return
@@ -408,10 +406,23 @@ func (s *natsService) response(requestId string, ok bool, v []byte, cause error)
 func (s *natsService) listen(conn *natsConn) {
 	requestQueue, subErr := conn.conn.QueueSubscribe(s.subject, natsServiceQueueName, func(msg *nats.Msg) {
 		// decode
-		subject, requestId, arg, decodeErr := decodeServiceRequest(conn.codec, msg.Data)
+		subject, requestId, argBytes, decodeErr := decodeServiceRequest(conn.codec, msg.Data)
 		if decodeErr != nil {
 			if err := msg.Respond(encodeServiceAck(false, decodeErr)); err != nil {
 				logger.Warnf("snailx: send ack failed, discard service call, %v", err)
+			}
+			return
+		}
+		arg := reflect.New(s.local.argType)
+		var decodeArgErr error
+		if s.local.argType.Kind() == reflect.Ptr {
+			decodeArgErr = conn.codec.Unmarshal(argBytes, arg)
+		} else {
+			decodeArgErr = conn.codec.Unmarshal(argBytes, &arg)
+		}
+		if decodeArgErr != nil {
+			if err := msg.Respond(encodeServiceAck(false, decodeArgErr)); err != nil {
+				logger.Warnf("snailx: send ack failed, discard service call, %v", decodeArgErr)
 			}
 			return
 		}
@@ -423,6 +434,7 @@ func (s *natsService) listen(conn *natsConn) {
 		if !ok {
 			panic("snailx: get service handler from pool failed, bad type")
 		}
+		logger.Debugf("service arg %v", arg)
 		handler.subject = subject
 		handler.conn = conn
 		handler.requestId = requestId
@@ -535,6 +547,7 @@ func (s *natsServiceGroup) Invoke(address string, arg interface{}, cb ServiceCal
 		s.locals.Invoke(address, arg, cb, local...)
 		return
 	}
+	logger.Debugf("invoke remote service, address is %s", address)
 	cbType := reflect.TypeOf(cb)
 	if cbType.Kind() != reflect.Func {
 		panic("snailx: cb needs to be a func")
