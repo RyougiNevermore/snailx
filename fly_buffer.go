@@ -169,7 +169,6 @@ func (s *status) isClosed() bool {
 	return statusClosed == atomic.LoadInt64(&s.v)
 }
 
-
 // Note: The array capacity must be a power of two, e.g. 2, 4, 8, 16, 32, 64, etc.
 func newArrayBuffer(capacity int64) *arrayBuffer {
 	b := &arrayBuffer{
@@ -231,7 +230,7 @@ func (b *arrayBuffer) Recv() (event interface{}, active bool) {
 	for {
 
 		if next <= b.wdSeq.Get() && next == b.rdSeq.Get()+1 {
-			event = b.buffer.get(next).(*serviceEvent)
+			event = b.buffer.get(next)
 			b.rdSeq.Incr()
 			break
 		}

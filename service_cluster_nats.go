@@ -8,6 +8,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nuid"
 	"reflect"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -334,11 +335,13 @@ type natsService struct {
 	requestQueue    *nats.Subscription
 	responseQueue   *nats.Subscription
 	local           *localService
+	eventLoop       *natsServiceResponseEventLoop
 }
 
 func (s *natsService) stop() {
 	_ = s.requestQueue.Unsubscribe()
 	_ = s.responseQueue.Unsubscribe()
+	_ = s.eventLoop.stop()
 	s.responseMap.clean()
 	s.wg.Wait()
 	return
@@ -377,57 +380,7 @@ func (s *natsService) request(conn *natsConn, arg interface{}, cb reflect.Value,
 		return
 	}
 
-	s.wg.Add(1)
-	// TODO CHANGE TO EVENT BUS
-	go func(ch chan *natsServiceResponse, wg *sync.WaitGroup, cb reflect.Value, codec Codec) {
-		defer wg.Done()
-		resp, ok := <-ch
-		if !ok {
-			return
-		}
-		respOk := resp.ok
-		resultCause := resp.cause
-		var resultValue reflect.Value
-		if resp.data == nil {
-			resultValue = reflect.Zero(resultType)
-		} else {
-			resultValue = reflect.New(resultType)
-			var decodeErr error
-			if resultType.Kind() == reflect.Ptr {
-				decodeErr = codec.Unmarshal(resp.data, resultValue.Interface())
-			} else {
-				decodeErr = codec.Unmarshal(resp.data, resultValue.Elem().Interface())
-			}
-			if decodeErr != nil {
-				respOk = false
-				if resultCause != nil {
-					resultCause = fmt.Errorf("%v, decode result failed, %v", resultCause, decodeErr)
-				} else {
-					resultCause = decodeErr
-				}
-			}
-		}
-
-		okValue := reflect.ValueOf(respOk)
-		var causeValue reflect.Value
-		if resultCause != nil {
-			causeValue = reflect.ValueOf(resultCause)
-		} else {
-			causeValue = emptyErrValue
-		}
-
-		if resultType.Kind() == reflect.Ptr {
-			cb.Call([]reflect.Value{okValue, resultValue.Elem(), causeValue})
-		} else {
-			cb.Call([]reflect.Value{okValue, resultValue, causeValue})
-		}
-
-		resp.ok = false
-		resp.data = nil
-		resp.cause = nil
-		natsServiceResponsePool.Put(resp)
-	}(ch, s.wg, cb, conn.codec)
-
+	err = s.eventLoop.send(ch, s.wg, cb, conn.codec, resultType)
 	return
 }
 
@@ -553,6 +506,10 @@ func (s *natsServiceGroup) Deploy(address string, service Service) (err error) {
 	}
 	s.locals.mutex.Lock()
 	defer s.locals.mutex.Unlock()
+	eventLoop := newNatsServiceResponseEventLoop(runtime.NumCPU() * 128)
+	if err = eventLoop.start(); err != nil {
+		return
+	}
 	natsService := &natsService{
 		address:         address,
 		subject:         buildNatsServiceSubject(address),
@@ -560,6 +517,7 @@ func (s *natsServiceGroup) Deploy(address string, service Service) (err error) {
 		wg:              new(sync.WaitGroup),
 		responseMap:     newResponseMap(),
 		local:           s.locals.services[address],
+		eventLoop:       eventLoop,
 	}
 	natsService.listenRequest(s.conn)
 	natsService.listenResponse(s.conn)
