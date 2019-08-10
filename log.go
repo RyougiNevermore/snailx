@@ -3,8 +3,10 @@ package snailx
 import (
 	"fmt"
 	"github.com/mattn/go-colorable"
+	"io"
 	"os"
 	"runtime"
+	"sync"
 	"time"
 )
 
@@ -24,7 +26,7 @@ type Logger interface {
 	Fatalf(format string, args ...interface{})
 }
 
-var logger Logger = Newlogger(LoggerLevelWarn)
+var logger Logger = Newlogger(LoggerLevelWarn, os.Stdout)
 
 func SetLogger(log Logger)  {
 	logger = log
@@ -34,18 +36,18 @@ func Log() Logger {
 	return logger
 }
 
-func Newlogger(level int) Logger {
+func Newlogger(level int, w io.Writer) Logger {
 	colorable.NewColorableStdout()
-	return &slog{Level:level}
+	return &slog{Level:level, locker:&sync.Mutex{}, writer:w}
 }
 
 type slog struct {
+	locker sync.Locker
 	Level int
+	writer io.Writer
 }
 
-func getFileLine(calldepth int) (loc string) {
-
-
+func getRunLocation(calldepth int) (loc string) {
 	_, file, line, ok := runtime.Caller(calldepth)
 	if !ok {
 		file = "???"
@@ -59,6 +61,11 @@ func (s *slog) Debugf(format string, args ...interface{}) {
 	if s.Level > LoggerLevelDebug {
 		return
 	}
+	loc := getRunLocation(2)
+	s.locker.Lock()
+	defer s.locker.Unlock()
+
+
 	fmt.Println("[snailx] [\x1b[32mDEBUG\x1b[0m]", fmt.Sprintf("[%-29s]", time.Now().Format("2006-01-02 15:04:05.999999999")), getFileLine(2), fmt.Sprintf(format, args...))
 }
 

@@ -10,16 +10,11 @@ import (
 
 func New() (x SnailX) {
 	services := newLocalServiceGroup()
-	serviceBus := newServiceEventLoopBus(services)
-	if err := serviceBus.start(); err != nil {
-		panic(err)
-	}
 	x = &standaloneSnailX{
-		services: services,
-		snailMap: make(map[string]Snail),
+		serviceGroup: services,
+		snailMap: newSnails(),
 		runMutex: new(sync.Mutex),
 		run:      true,
-		serviceBus:serviceBus,
 	}
 	return
 }
@@ -29,13 +24,11 @@ type SnailX interface {
 	Deploy(snail Snail) (id string)
 	DeployWithOptions(snail Snail, options SnailOptions) (id string)
 	UnDeploy(snailId string)
-	ServiceBus() (bus ServiceBus)
 }
 
 type standaloneSnailX struct {
-	serviceBus ServiceBus
-	services ServiceGroup
-	snailMap map[string]Snail
+	serviceGroup ServiceGroup
+	snailMap *snails
 	runMutex *sync.Mutex
 	run      bool
 }
@@ -48,26 +41,18 @@ func (x *standaloneSnailX) Stop() (err error) {
 		return
 	}
 	x.run = false
-	ids := make([]string, 0, len(x.snailMap))
-	for id := range x.snailMap {
-		ids = append(ids, id)
+	ids := x.snailMap.ids()
+	if ids == nil {
+		return
 	}
-	wg := new(sync.WaitGroup)
 	for _, id := range ids {
-		wg.Add(1)
-		go func(id string, x *standaloneSnailX, wg *sync.WaitGroup) {
-			if snail, has := x.snailMap[id]; has {
-				snail.Stop()
-				wg.Done()
-			}
-		}(id, x, wg)
+		if snail, has := x.snailMap.get(id); has {
+			snail.Stop()
+			x.snailMap.del(id)
+		}
 	}
-	wg.Wait()
-	for _, id := range ids {
-		delete(x.snailMap, id)
-	}
-	x.services.UnDeployAll()
-	return x.serviceBus.stop()
+	x.serviceGroup.UnDeployAll()
+	return
 }
 
 func (x *standaloneSnailX) Deploy(snail Snail) (id string) {
@@ -77,14 +62,14 @@ func (x *standaloneSnailX) Deploy(snail Snail) (id string) {
 		panic("deploy failed, cause it is stopped")
 		return
 	}
-	id = fmt.Sprintf("snail-%d-%s", len(x.snailMap)+1, nuid.Next())
-	serviceBus := newServiceEventLoopBus(x.services)
+	id = fmt.Sprintf("snail-%s", nuid.Next())
+	serviceBus := newServiceEventLoopBus(x.serviceGroup)
 	if err := serviceBus.start(); err != nil {
 		panic(err)
 	}
 	snail.SetServiceBus(serviceBus)
 	snail.Start()
-	x.snailMap[id] = snail
+	x.snailMap.put(id, snail)
 	return
 }
 
@@ -96,25 +81,25 @@ func (x *standaloneSnailX) DeployWithOptions(snail Snail, options SnailOptions) 
 		return
 	}
 	var serviceBus ServiceBus
-	id = fmt.Sprintf("snail-%d-%s", len(x.snailMap)+1, nuid.Next())
+	id = fmt.Sprintf("snail-%s", nuid.Next())
 	serviceKind := options.ServiceBusKind
 	if serviceKind == "" {
 		serviceKind = EventServiceBus
 	}
 	if options.ServiceBusKind == EventServiceBus {
-		serviceBus = newServiceEventLoopBus(x.services)
+		serviceBus = newServiceEventLoopBus(x.serviceGroup)
 	} else if options.ServiceBusKind == WorkerServiceBus {
 		workers := options.WorkersNum
 		if workers <= 0 {
-			workers = runtime.NumCPU() * 2
+			workers = runtime.NumCPU()
 		}
-		serviceBus = newServiceWorkBus(workers, x.services)
+		serviceBus = newServiceWorkBus(workers, x.serviceGroup)
 	} else if options.ServiceBusKind == FlyServiceBus {
 		flyServiceBusCapacity := options.FlyServiceBusCapacity
 		if flyServiceBusCapacity <= 0 {
-			flyServiceBusCapacity = runtime.NumCPU() * 2 * 64
+			flyServiceBusCapacity = runtime.NumCPU() * 128
 		}
-		serviceBus = newServiceEventFlyBus(flyServiceBusCapacity, x.services)
+		serviceBus = newServiceEventFlyBus(flyServiceBusCapacity, x.serviceGroup)
 	} else {
 		panic("snailx: unknown service kind")
 		return
@@ -124,24 +109,19 @@ func (x *standaloneSnailX) DeployWithOptions(snail Snail, options SnailOptions) 
 	}
 	snail.SetServiceBus(serviceBus)
 	snail.Start()
-	x.snailMap[id] = snail
+	x.snailMap.put(id, snail)
 	return
 }
 
-func (x *standaloneSnailX) UnDeploy(snailId string) {
+func (x *standaloneSnailX) UnDeploy(id string) {
 	x.runMutex.Lock()
 	defer x.runMutex.Unlock()
 	if x.run == false {
 		panic("deploy failed, cause it is stopped")
 		return
 	}
-	if snail, has := x.snailMap[snailId]; has {
+	if snail, has := x.snailMap.get(id); has {
 		snail.Stop()
-		delete(x.snailMap, snailId)
+		x.snailMap.del(id)
 	}
-}
-
-func (x *standaloneSnailX) ServiceBus() (bus ServiceBus) {
-	bus = x.serviceBus
-	return
 }

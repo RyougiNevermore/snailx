@@ -1,3 +1,17 @@
 testing
 
 sync.map
+
+snailx -> event bus + snails + status
+
+snail -> with parent event bus
+
+event bus -> service group
+
+service group -> local service + remote service proxy
+
+service func
+
+service invoker -> func
+
+service handler -> local or remote proxy

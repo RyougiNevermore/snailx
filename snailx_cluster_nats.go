@@ -2,20 +2,51 @@ package snailx
 
 import (
 	"github.com/nats-io/nats.go"
+	"runtime"
 	"sync"
 	"time"
 )
 
-func NewNatsCluster(conn *nats.Conn, codec Codec, timeout time.Duration) (x SnailX) {
-	if conn == nil {
-		panic("snailx: nats's conn is nil")
+type NatsConnections struct {
+	lock sync.Locker
+	idx int64
+	mask int64
+	connections  []*nats.Conn
+	codec Codec
+	timeout time.Duration
+}
+
+func NewNatsConnections(conn *nats.Conn, codec Codec, timeout time.Duration, size int) (natsConnections *NatsConnections) {
+	if timeout < 1 {
+		timeout = 30 * time.Second
+	}
+	if size < 1 {
+		size = runtime.NumCPU()
+	}
+	connections := make([]*nats.Conn, size)
+	for i := 0; i < size; i ++ {
+		connections[i] = conn
 	}
 	if codec == nil {
 		codec = NewMsgPackCodec()
 	}
-	if timeout <= 0 {
-		timeout = 60 * time.Second
+	natsConnections = &NatsConnections{
+		lock:&sync.Mutex{},
+		idx:0,
+		mask: int64(size) - 1,
+		connections:connections,
+		codec:codec,
+		timeout:timeout,
 	}
+	return
+}
+
+func NewNatsCluster(connections *NatsConnections) (x SnailX) {
+	if connections == nil {
+		panic("snailx: nats's connections is nil")
+	}
+
+
 	services := newNatsServiceGroup(conn, codec, timeout)
 	serviceBus := newServiceEventLoopBus(services)
 	if err := serviceBus.start(); err != nil {
@@ -35,3 +66,4 @@ func NewNatsCluster(conn *nats.Conn, codec Codec, timeout time.Duration) (x Snai
 type natsSnailX struct {
 	*standaloneSnailX
 }
+
