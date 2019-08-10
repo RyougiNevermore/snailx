@@ -4,36 +4,58 @@ import (
 	"errors"
 	"fmt"
 	"github.com/nats-io/nuid"
-	"runtime"
 	"sync"
 )
 
 func New() (x SnailX) {
-	services := newLocalServiceGroup()
-	x = &standaloneSnailX{
-		serviceGroup: services,
-		snailMap: newSnails(),
-		runMutex: new(sync.Mutex),
-		run:      true,
+
+	x = &snailX{
+		serviceBus: services,
+		snailMap:   newSnails(),
+		runMutex:   new(sync.Mutex),
+		run:        true,
 	}
 	return
 }
 
 type SnailX interface {
+	Start() (err error)
 	Stop() (err error)
 	Deploy(snail Snail) (id string)
-	DeployWithOptions(snail Snail, options SnailOptions) (id string)
 	UnDeploy(snailId string)
 }
 
-type standaloneSnailX struct {
-	serviceGroup ServiceGroup
-	snailMap *snails
-	runMutex *sync.Mutex
-	run      bool
+type snailX struct {
+	id         string
+	serviceBus ServiceBus
+	snailMap   *snails
+	runMutex   *sync.Mutex
+	run        bool
 }
 
-func (x *standaloneSnailX) Stop() (err error) {
+func (x *snailX) Start() (err error) {
+	x.runMutex.Lock()
+	defer x.runMutex.Unlock()
+	if x.run == true {
+		err = errors.New("start failed, cause it is running")
+		return
+	}
+	x.run = true
+	if err = x.serviceBus.start(); err != nil {
+		err = fmt.Errorf("start failed at start event service, %v", err)
+	}
+	x.snailMap.kv.Range(func(key, value interface{}) bool {
+		snail, ok := value.(Snail)
+		if !ok {
+			return ok
+		}
+		snail.Start()
+		return true
+	})
+	return
+}
+
+func (x *snailX) Stop() (err error) {
 	x.runMutex.Lock()
 	defer x.runMutex.Unlock()
 	if x.run == false {
@@ -51,69 +73,27 @@ func (x *standaloneSnailX) Stop() (err error) {
 			x.snailMap.del(id)
 		}
 	}
-	x.serviceGroup.UnDeployAll()
+	err = x.serviceBus.stop()
+	if err != nil {
+		err = fmt.Errorf("stop failed at stop service bus, %v", err)
+	}
 	return
 }
 
-func (x *standaloneSnailX) Deploy(snail Snail) (id string) {
+func (x *snailX) Deploy(snail Snail) (id string) {
 	x.runMutex.Lock()
 	defer x.runMutex.Unlock()
 	if x.run == false {
 		panic("deploy failed, cause it is stopped")
 		return
 	}
-	id = fmt.Sprintf("snail-%s", nuid.Next())
-	serviceBus := newServiceEventLoopBus(x.serviceGroup)
-	if err := serviceBus.start(); err != nil {
-		panic(err)
-	}
-	snail.SetServiceBus(serviceBus)
-	snail.Start()
+	id = nuid.Next()
+	snail.SetServiceBus(x.serviceBus)
 	x.snailMap.put(id, snail)
 	return
 }
 
-func (x *standaloneSnailX) DeployWithOptions(snail Snail, options SnailOptions) (id string) {
-	x.runMutex.Lock()
-	defer x.runMutex.Unlock()
-	if x.run == false {
-		panic("deploy failed, cause it is stopped")
-		return
-	}
-	var serviceBus ServiceBus
-	id = fmt.Sprintf("snail-%s", nuid.Next())
-	serviceKind := options.ServiceBusKind
-	if serviceKind == "" {
-		serviceKind = EventServiceBus
-	}
-	if options.ServiceBusKind == EventServiceBus {
-		serviceBus = newServiceEventLoopBus(x.serviceGroup)
-	} else if options.ServiceBusKind == WorkerServiceBus {
-		workers := options.WorkersNum
-		if workers <= 0 {
-			workers = runtime.NumCPU()
-		}
-		serviceBus = newServiceWorkBus(workers, x.serviceGroup)
-	} else if options.ServiceBusKind == FlyServiceBus {
-		flyServiceBusCapacity := options.FlyServiceBusCapacity
-		if flyServiceBusCapacity <= 0 {
-			flyServiceBusCapacity = runtime.NumCPU() * 128
-		}
-		serviceBus = newServiceEventFlyBus(flyServiceBusCapacity, x.serviceGroup)
-	} else {
-		panic("snailx: unknown service kind")
-		return
-	}
-	if err := serviceBus.start(); err != nil {
-		panic(err)
-	}
-	snail.SetServiceBus(serviceBus)
-	snail.Start()
-	x.snailMap.put(id, snail)
-	return
-}
-
-func (x *standaloneSnailX) UnDeploy(id string) {
+func (x *snailX) UnDeploy(id string) {
 	x.runMutex.Lock()
 	defer x.runMutex.Unlock()
 	if x.run == false {

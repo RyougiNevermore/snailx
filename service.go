@@ -22,6 +22,21 @@ type Service interface{}
 
 // func(bool, v, err)
 type ServiceCallback interface{}
+// func(bool, v, err)
+type ServiceResultHandler interface{}
+
+type localService struct {
+	value reflect.Value
+	argType reflect.Type
+}
+
+type remoteService interface {
+
+}
+
+type serviceFunc struct {
+
+}
 
 type ServiceGroup interface {
 	Deploy(address string, service Service) (err error)
@@ -37,10 +52,6 @@ var emptyLocalServiceHandlerType = reflect.TypeOf(&localServiceHandler{})
 //var emptyErr error = errors.New("")
 var emptyErrValue = reflect.Zero(reflect.TypeOf(errors.New("")))
 
-type localService struct {
-	service reflect.Value
-	argType reflect.Type
-}
 
 func (s *localService) call(arg interface{}, handler ServiceHandler)  {
 	if s.argType != reflect.TypeOf(arg) {

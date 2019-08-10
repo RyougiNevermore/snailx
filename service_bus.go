@@ -24,7 +24,7 @@ type ServiceBus interface {
 	stop() (err error)
 	Deploy(address string, service Service) (err error)
 	UnDeploy(address string) (err error)
-	Invoke(address string, arg interface{}, cb ServiceCallback) (err error)
+	Invoke(address string, arg interface{}, rb ServiceResultHandler) (err error)
 }
 
 func newServiceEventLoopBus(group ServiceGroup) ServiceBus {
@@ -152,7 +152,7 @@ func (s *serviceEventLoopBus) UnDeploy(address string) (err error) {
 	return
 }
 
-func (s *serviceEventLoopBus) Invoke(address string, arg interface{}, cb ServiceCallback) (err error) {
+func (s *serviceEventLoopBus) Invoke(address string, arg interface{}, cb ServiceResultHandler) (err error) {
 	s.runMutex.RLock()
 	defer s.runMutex.RUnlock()
 	if s.run == false {
@@ -267,7 +267,7 @@ func (s *serviceWorkBus) UnDeploy(address string) (err error) {
 	return
 }
 
-func (s *serviceWorkBus) Invoke(address string, arg interface{}, cb ServiceCallback) (err error) {
+func (s *serviceWorkBus) Invoke(address string, arg interface{}, cb ServiceResultHandler) (err error) {
 	s.runMutex.RLock()
 	defer s.runMutex.RUnlock()
 	if s.run == false {
