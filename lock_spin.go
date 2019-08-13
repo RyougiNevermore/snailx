@@ -12,6 +12,7 @@ func (l *spinlock) Lock() {
 		runtime.Gosched()
 	}
 }
+
 func (l *spinlock) Unlock() {
 	atomic.StoreUintptr(&l.lock, 0)
 }

@@ -1,11 +1,11 @@
-package snailx
+package internal
 
 import (
 	"bytes"
 	"sync"
 )
 
-var defaultByteBufferPool = NewByteBuffers(1024 * 4)
+var DefaultByteBufferPool = NewByteBuffers(1024 * 4)
 
 func NewByteBuffers(cap int) (buf *ByteBuffers) {
 	buf = &ByteBuffers{pool: &sync.Pool{
