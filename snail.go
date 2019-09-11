@@ -17,8 +17,8 @@ type SnailOptions struct {
 
 type Snail interface {
 	SetServiceBus(bus ServiceBus)
-	Start()
-	Stop()
+Start()
+Stop()
 }
 
 func newSnails() (s *snails) {
